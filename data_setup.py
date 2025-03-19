@@ -1,82 +1,203 @@
-import pandas as pd
-from sklearn.preprocessing import MultiLabelBinarizer
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-from PIL import Image
+import zipfile
+import numpy as np
 import os
 import matplotlib.pyplot as plt
+import torch
+from torchvision.datasets import ImageFolder
+from torch.utils.data import random_split, DataLoader
+import shutil
 
-# Load your CSV file
-df = pd.read_csv('genres.csv')
+def unzip_folder(zip_path, extract_to):
+    # Ensure the output directory exists
+    os.makedirs(extract_to, exist_ok=True)
 
-# Ensure the genre column is treated as a list of genres
-df['genre'] = df['genre'].apply(lambda x: x.split(','))  # Assuming genres are comma-separated
+    # Open the zip file and extract all contents
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_to)
+    print(f"Extracted '{zip_path}' to '{extract_to}'")
 
-# Group by 'id' and aggregate genres
-df_grouped = df.groupby('id')['genre'].apply(lambda x: sum(x, [])).reset_index()
+# Example usage
+zip_path = 'archive.zip'  # Replace with the path to your zip file
+extract_to = 'PosterGenreData'  # Replace with the desired output folder
 
-# Define the labels
-labels = ['Comedy', 'Adventure', 'Thriller', 'Drama', 'Science Fiction', 'Action',
-          'Music', 'Romance', 'History', 'Crime', 'Animation', 'Mystery', 'Horror',
-          'Family', 'Fantasy', 'War', 'Western', 'TV Movie', 'Documentary']
+# Run only for the first time
 
-# Initialize MultiLabelBinarizer with the defined labels
-mlb = MultiLabelBinarizer(classes=labels)
+def split_dataset(dataset_path, train_dir, test_dir, test_size=0.3, random_seed=42):
+    torch.manual_seed(random_seed)
 
-# Fit and transform the aggregated genre lists to a binary matrix
-binary_labels = mlb.fit_transform(df_grouped['genre'])
+    # Load the dataset
+    dataset = ImageFolder(dataset_path)
 
-# Add the binary labels back to the DataFrame as individual columns
-for i, label in enumerate(labels):
-    df_grouped[label] = binary_labels[:, i]
+    # Calculate train and test sizes
+    total_size = len(dataset)
+    test_size = int(total_size * test_size)
+    train_size = total_size - test_size
 
-# Save the updated DataFrame to a new CSV
-df_grouped.to_csv('binary_genres_grouped.csv', index=False)
+    # Perform the split
+    train_data, test_data = random_split(dataset, [train_size, test_size])
+
+    # Helper to copy images to directories
+    def copy_files(data, target_dir):
+        for idx, (img_obj, label) in enumerate(data):
+            # Get the original path using dataset.samples
+            img_path, _ = dataset.samples[idx]
+
+            # Get the genre name from the label
+            genre_name = dataset.classes[label]
+            target_genre_dir = os.path.join(target_dir, genre_name)
+            os.makedirs(target_genre_dir, exist_ok=True)
+
+            # Copy the image to the appropriate folder
+            shutil.copy(img_path, target_genre_dir)
+
+    print("Copying train images...")
+    copy_files(train_data, train_dir)
+
+    print("Copying test images...")
+    copy_files(test_data, test_dir)
+
+    print("Train/Test split complete.")
+
+# Example usage
+dataset_path = 'Dataset/Posters/Posters_Train'
+new_train_folder = 'Dataset/Posters/New_Train'
+new_test_folder = 'Dataset/Posters/New_Test'
+
+# Perform the split with 70/30 ratio
+# split_dataset(dataset_path, new_train_folder, new_test_folder, test_size=0.3)
+
+
+def getting_percentage_of_dominant_colors(cluster, centroids):
+    labels = np.arange(0, len(np.unique(cluster.labels_)) + 1)
+    (hist, _) = np.histogram(cluster.labels_, bins=labels)
+    hist = hist.astype("float")
+    hist /= hist.sum()
+
+    # iterate through each cluster's color and percentage
+    colors = sorted([(percent, color) for (percent, color) in zip(hist, centroids)])
+    for (percent, color) in colors:
+        try:
+            if percent > 0.50:
+                print(color, "{:0.2f}%".format(percent * 100))
+                return True
+        except Exception as e:
+            print(str(e))
+    return False
 
 
 
 
-class FilmPosterDataset(Dataset):
-    def __init__(self, csv_file, root_dir, transform=None):
-        # Load the labels CSV file
-        self.data_frame = pd.read_csv(csv_file)
-        self.root_dir = root_dir
-        self.transform = transform
 
-    def __len__(self):
-        return len(self.data_frame)
+def count_images_in_folders(base_dir):
+    """
+    Recursively counts the number of images in each genre folder inside the given base directory.
+    Returns a dictionary with folder names and their corresponding image counts.
+    """
+    image_counts = {}
+    total_images = 0
 
-    def __getitem__(self, idx):
-        # Get the image file name
-        img_name = os.path.join(self.root_dir, self.data_frame.iloc[idx, 0])
-        
-        # Open the image
-        image = Image.open(img_name).convert('RGB')
-        
-        # Get the binary labels
-        labels = self.data_frame.iloc[idx, 1:].values.astype('float32')
-        
-        # Apply any transformations (e.g., resizing, normalization)
-        if self.transform:
-            image = self.transform(image)
-        
-        return image, labels
+    # Walk through all subdirectories of the base directory
+    for root, dirs, files in os.walk(base_dir):
+        if len(files) > 0:  # If the folder contains files
+            genre_name = os.path.basename(root)  # Extract the genre name
+            image_counts[genre_name] = len(files)  # Count the number of files
+            total_images += len(files)
 
-# Define image transformations
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),  # Resize to match the input size expected by the model
-    transforms.ToTensor(),  # Convert image to PyTorch tensor
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # Normalize
-])
+    return image_counts, total_images
 
-# Create the dataset
-dataset = FilmPosterDataset(csv_file='binary_genres_grouped.csv', root_dir='./posters/', transform=transform)
+def plot_histogram(image_counts, title):
+    """
+    Plots a histogram using the image counts.
+    """
+    genres = list(image_counts.keys())
+    counts = list(image_counts.values())
 
-# Create a DataLoader for batching and shuffling the data
-dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+    plt.figure(figsize=(15, 5))  # Adjust the figure size for readability
+    plt.bar(genres, counts, color='skyblue')
+    plt.xticks(rotation=45, ha='right')  # Rotate genre labels for better visibility
+    plt.xlabel('Genres')
+    plt.ylabel('Number of Images')
+    plt.title(title)
+    plt.tight_layout()  # Ensure everything fits
+    plt.show()
 
-# Example: iterating through the dataset
-for images, labels in dataloader:
-    print(images.shape, labels.shape)
-    break  # Remove this line to loop through the entire dataset
+# Paths to the dataset folders
+train_folder = 'Dataset/Posters/Train'
+test_folder = 'Dataset/Posters/Test'
+validation_folder = 'Dataset/Posters/Validation'
 
+# Count images in train and validation folders
+train_counts, train_total = count_images_in_folders(train_folder)
+test_counts, test_total = count_images_in_folders(test_folder)
+validation_counts, valid_total = count_images_in_folders(validation_folder)
+
+# Plot histograms
+print("Train Image Counts:", train_counts, "Total: ", train_total)
+plot_histogram(train_counts, 'Number of Images per Genre (Training Set)')
+
+print("test Image Counts:", test_counts, "Total: ", test_total)
+
+plot_histogram(test_counts, 'Number of Images per Genre (Test Set)')
+
+print("Validation Image Counts:", validation_counts)
+plot_histogram(validation_counts, 'Number of Images per Genre (Validation Set)')
+
+
+'''
+
+plt.imshow(image)
+plt.axis('off')  # Turn off axis for cleaner visualization
+plt.title(f"Genre: {train_classes[label]}")
+plt.show()
+
+# Path to the train dataset (adjust based on your setup)
+dataset_path = "Dataset/Posters/Posters_Train"
+
+
+def get_random_image_with_label():
+    """Select a random image and return it with its genre label."""
+    genre_folder = random.choice(os.listdir(dataset_path))
+    images_path = os.path.join(dataset_path, genre_folder)
+    image_file = random.choice(os.listdir(images_path))
+    label = genre_folder  # Use the folder name as the label
+    image = Image.open(os.path.join(images_path, image_file)).convert('RGB')
+    return image, label
+
+
+def visualize_images_with_transform(n=5):
+    """Visualize n random images before and after transformations."""
+    fig, axes = plt.subplots(n, 2, figsize=(10, 5 * n))
+
+    for i in range(n):
+        # Get a random image and label
+        original_image, label = get_random_image_with_label()
+
+        # Apply the transformation
+        transformed_image = test_transform(original_image)
+
+        # Convert transformed Tensor back to PIL for visualization
+        transformed_image = transforms.ToPILImage()(transformed_image)
+
+        # Plot original and transformed images
+        axes[i, 0].imshow(original_image)
+        axes[i, 0].set_title(f"Original: {label}")
+        axes[i, 0].axis('off')
+
+        axes[i, 1].imshow(transformed_image)
+        axes[i, 1].set_title(f"Transformed: {label}")
+        axes[i, 1].axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+
+# Visualize 5 random images with transformations
+# visualize_images_with_transform(n=5)
+
+
+
+# Display dataset info
+
+get_dataset_info(train_dataset, "Train Dataset")
+get_dataset_info(test_dataset, "Test Dataset")
+get_dataset_info(validation_dataset, "Validation Dataset")'''
